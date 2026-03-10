@@ -11,6 +11,19 @@ Target framework: .NET 10 (`net10.0-windows`).
 - `WindowExplorerSession.gui`: WinForms desktop app to list, browse, and manage sessions.
 - `WindowExplorerSession.IconBuilder`: Utility to generate app icons and auto-configure GUI/CLI project icon settings.
 
+## Icon Workflow
+
+Regenerate icons and auto-apply icon settings for both GUI and CLI projects:
+
+```powershell
+dotnet run --project .\WindowExplorerSession.IconBuilder\WindowExplorerSession.IconBuilder.csproj -- .
+```
+
+This command updates:
+- `WindowExplorerSession.gui\Assets\WindowExplorerSession.gui.ico`
+- `WindowExplorerSession.cli\Assets\WindowExplorerSession.cli.ico`
+- `ApplicationIcon` settings in both `.csproj` files
+
 ## Build
 
 ```powershell
@@ -41,19 +54,6 @@ dotnet run --project .\WindowExplorerSession.cli -- load "D:\sessions\explorer-s
 ```powershell
 dotnet run --project .\WindowExplorerSession.gui
 ```
-
-## Icon Workflow
-
-Regenerate icons and auto-apply icon settings for both GUI and CLI projects:
-
-```powershell
-dotnet run --project .\WindowExplorerSession.IconBuilder\WindowExplorerSession.IconBuilder.csproj -- .
-```
-
-This command updates:
-- `WindowExplorerSession.gui\Assets\WindowExplorerSession.gui.ico`
-- `WindowExplorerSession.cli\Assets\WindowExplorerSession.cli.ico`
-- `ApplicationIcon` settings in both `.csproj` files
 
 The GUI supports:
 - refresh session list
