@@ -26,8 +26,8 @@ internal sealed partial class MainForm : Form
         MinimumSize = new Size(860, 500);
         StartPosition = FormStartPosition.CenterScreen;
 
-        _windowIcon = CreateFolderManagementIcon(32);
-        _trayAppIcon = CreateFolderManagementIcon(16);
+        _windowIcon = LoadApplicationIcon();
+        _trayAppIcon = (Icon)_windowIcon.Clone();
         Icon = _windowIcon;
 
         BuildLayout();
