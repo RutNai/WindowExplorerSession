@@ -5,7 +5,6 @@ namespace WindowExplorerSession.Core;
 public sealed class SessionManager
 {
     private static int _restoreInProgress;
-    private static readonly TimeSpan DesktopSwitchSettleDelay = TimeSpan.FromMilliseconds(0);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -86,7 +85,7 @@ public sealed class SessionManager
             }
 
             // Some Explorer windows signal attention after delayed initialization.
-            Thread.Sleep(220);
+            // Thread.Sleep(220);
             foreach (var hwnd in restoredHandles)
             {
                 WindowRestorer.StopTaskbarBlink(hwnd);
@@ -345,7 +344,7 @@ public sealed class SessionManager
             // Explorer can resize after initial creation; apply saved placement again once windows settle.
             if (restoredInGroup.Count > 0)
             {
-                Thread.Sleep(260);
+                // Thread.Sleep(260);
                 foreach (var restoredItem in restoredInGroup)
                 {
                     WindowRestorer.Restore(restoredItem.Hwnd, restoredItem.State);
@@ -354,7 +353,7 @@ public sealed class SessionManager
             }
 
             // Give shell state a moment to settle before moving to the next virtual desktop.
-            Thread.Sleep(DesktopSwitchSettleDelay);
+            // Thread.Sleep(400);
         }
 
         return restored;

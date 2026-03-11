@@ -22,7 +22,7 @@ internal static class ExplorerWindowWaiter
                 }
             }
 
-            Thread.Sleep(150);
+            Thread.Sleep(30);
         }
 
         return IntPtr.Zero;
