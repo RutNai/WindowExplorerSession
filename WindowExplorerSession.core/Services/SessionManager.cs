@@ -4,6 +4,9 @@ namespace WindowExplorerSession.Core;
 
 public sealed class SessionManager
 {
+    private static int _restoreInProgress;
+    private static readonly TimeSpan DesktopSwitchSettleDelay = TimeSpan.FromMilliseconds(0);
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         WriteIndented = true
@@ -30,40 +33,67 @@ public sealed class SessionManager
 
     public int RestoreSession(string? filePath = null)
     {
-        var effectivePath = string.IsNullOrWhiteSpace(filePath)
-            ? SessionPathProvider.GetDefaultLatestSessionPath()
-            : filePath;
+        var startingDesktopId = VirtualDesktopRegistry.TryGetCurrentDesktopId();
+        var restoredHandles = new HashSet<IntPtr>();
 
-        if (string.IsNullOrWhiteSpace(effectivePath))
+        if (Interlocked.CompareExchange(ref _restoreInProgress, 1, 0) != 0)
         {
-            throw new FileNotFoundException($"No session files found in '{SessionPathProvider.GetDefaultSessionDirectory()}'.");
+            throw new InvalidOperationException("Restore is already in progress.");
         }
 
-        if (!File.Exists(effectivePath))
+        try
         {
-            throw new FileNotFoundException($"Session file not found: '{effectivePath}'", effectivePath);
-        }
+            var effectivePath = string.IsNullOrWhiteSpace(filePath)
+                ? SessionPathProvider.GetDefaultLatestSessionPath()
+                : filePath;
 
-        var session = JsonSerializer.Deserialize<ExplorerSession>(File.ReadAllText(effectivePath), JsonOptions);
-        if (session?.Windows is null || session.Windows.Count == 0)
-        {
-            throw new InvalidDataException("Session file has no Explorer windows to restore.");
-        }
-
-        var existingWindows = ExplorerWindowEnumerator.GetWindows().ToList();
-        var existingHandles = existingWindows.Select(w => w.Hwnd).ToHashSet();
-        var alreadyOpenHandleQueues = OpenWindowTracker.BuildHandleQueues(existingWindows);
-
-        var restored = 0;
-        foreach (var state in session.Windows)
-        {
-            if (TryRestoreWindowState(state, existingHandles, alreadyOpenHandleQueues))
+            if (string.IsNullOrWhiteSpace(effectivePath))
             {
-                restored++;
+                throw new FileNotFoundException($"No session files found in '{SessionPathProvider.GetDefaultSessionDirectory()}'.");
             }
-        }
 
-        return restored;
+            if (!File.Exists(effectivePath))
+            {
+                throw new FileNotFoundException($"Session file not found: '{effectivePath}'", effectivePath);
+            }
+
+            var session = JsonSerializer.Deserialize<ExplorerSession>(File.ReadAllText(effectivePath), JsonOptions);
+            if (session?.Windows is null || session.Windows.Count == 0)
+            {
+                throw new InvalidDataException("Session file has no Explorer windows to restore.");
+            }
+
+            var existingWindows = ExplorerWindowEnumerator.GetWindows().ToList();
+            var existingHandles = existingWindows.Select(w => w.Hwnd).ToHashSet();
+
+            var restored = RestoreSessionDesktopBlocking(
+                OrderByDesktop(session.Windows),
+                existingHandles,
+                restoredHandles);
+
+            return restored;
+        }
+        finally
+        {
+            if (startingDesktopId.HasValue)
+            {
+                _ = VirtualDesktopNavigator.TrySwitchToDesktopId(startingDesktopId.Value);
+            }
+
+            foreach (var hwnd in restoredHandles)
+            {
+                WindowRestorer.StopTaskbarBlink(hwnd);
+            }
+
+            // Some Explorer windows signal attention after delayed initialization.
+            Thread.Sleep(220);
+            foreach (var hwnd in restoredHandles)
+            {
+                WindowRestorer.StopTaskbarBlink(hwnd);
+            }
+
+            Interlocked.Exchange(ref _restoreInProgress, 0);
+        }
     }
 
     public int RestoreSessionWindow(string filePath, int windowIndex)
@@ -93,7 +123,28 @@ public sealed class SessionManager
         var existingHandles = existingWindows.Select(w => w.Hwnd).ToHashSet();
         var alreadyOpenHandleQueues = OpenWindowTracker.BuildHandleQueues(existingWindows);
 
-        return TryRestoreWindowState(session.Windows[windowIndex], existingHandles, alreadyOpenHandleQueues) ? 1 : 0;
+        if (Interlocked.CompareExchange(ref _restoreInProgress, 1, 0) != 0)
+        {
+            throw new InvalidOperationException("Restore is already in progress.");
+        }
+
+        try
+        {
+            var state = session.Windows[windowIndex];
+            _ = VirtualDesktopNavigator.TrySwitchToDesktopName(state.VirtualDesktopName);
+
+            if (!TryRestoreWindowState(state, existingHandles, alreadyOpenHandleQueues, out var restoredHwnd))
+            {
+                return 0;
+            }
+
+            WindowRestorer.StopTaskbarBlink(restoredHwnd);
+            return 1;
+        }
+        finally
+        {
+            Interlocked.Exchange(ref _restoreInProgress, 0);
+        }
     }
 
     public IReadOnlyList<SavedWindowInfo> GetSessionWindows(string filePath)
@@ -227,8 +278,11 @@ public sealed class SessionManager
     private static bool TryRestoreWindowState(
         ExplorerWindowState state,
         HashSet<IntPtr> existingHandles,
-        Dictionary<string, Queue<IntPtr>> alreadyOpenHandleQueues)
+        Dictionary<string, Queue<IntPtr>> alreadyOpenHandleQueues,
+        out IntPtr restoredHwnd)
     {
+        restoredHwnd = IntPtr.Zero;
+
         if (string.IsNullOrWhiteSpace(state.Address))
         {
             return false;
@@ -237,6 +291,7 @@ public sealed class SessionManager
         if (OpenWindowTracker.TryTakeAlreadyOpenWindowHandle(alreadyOpenHandleQueues, state.Address, out var openHwnd))
         {
             WindowRestorer.Restore(openHwnd, state);
+            restoredHwnd = openHwnd;
             return true;
         }
 
@@ -249,6 +304,101 @@ public sealed class SessionManager
 
         existingHandles.Add(hwnd);
         WindowRestorer.Restore(hwnd, state);
+        restoredHwnd = hwnd;
         return true;
     }
+
+    private static int RestoreSessionDesktopBlocking(
+        IReadOnlyList<DesktopRestoreGroup> desktopGroups,
+        HashSet<IntPtr> existingHandles,
+        ISet<IntPtr> restoredHandles)
+    {
+        var restored = 0;
+
+        foreach (var group in desktopGroups)
+        {
+            EnsureDesktopReady(group.DesktopName);
+
+            var restoredInGroup = new List<(IntPtr Hwnd, ExplorerWindowState State)>();
+
+            foreach (var state in group.Windows)
+            {
+                if (string.IsNullOrWhiteSpace(state.Address))
+                {
+                    continue;
+                }
+
+                EnsureDesktopReady(group.DesktopName);
+                ExplorerLauncher.OpenAddress(state.Address, separateProcess: false);
+                var matchedHwnd = ExplorerWindowWaiter.WaitForNewWindow(existingHandles, state.Address, TimeSpan.FromSeconds(12));
+                if (matchedHwnd != IntPtr.Zero)
+                {
+                    existingHandles.Add(matchedHwnd);
+                    WindowRestorer.Restore(matchedHwnd, state);
+                    WindowRestorer.StopTaskbarBlink(matchedHwnd);
+                    _ = restoredHandles.Add(matchedHwnd);
+                    restoredInGroup.Add((matchedHwnd, state));
+                    restored++;
+                }
+            }
+
+            // Explorer can resize after initial creation; apply saved placement again once windows settle.
+            if (restoredInGroup.Count > 0)
+            {
+                Thread.Sleep(260);
+                foreach (var restoredItem in restoredInGroup)
+                {
+                    WindowRestorer.Restore(restoredItem.Hwnd, restoredItem.State);
+                    WindowRestorer.StopTaskbarBlink(restoredItem.Hwnd);
+                }
+            }
+
+            // Give shell state a moment to settle before moving to the next virtual desktop.
+            Thread.Sleep(DesktopSwitchSettleDelay);
+        }
+
+        return restored;
+    }
+
+    private static void EnsureDesktopReady(string? desktopName)
+    {
+        if (VirtualDesktopNavigator.TrySwitchToDesktopName(desktopName))
+        {
+            return;
+        }
+
+        // Fallback settle delay if Windows did not confirm desktop switch.
+        Thread.Sleep(180);
+    }
+
+    private static IReadOnlyList<DesktopRestoreGroup> OrderByDesktop(IReadOnlyList<ExplorerWindowState> windows)
+    {
+        var order = VirtualDesktopRegistry.GetDesktopOrder();
+        var nameById = order
+            .Select(id => new { Id = id, Name = VirtualDesktopRegistry.TryGetDesktopName(id) })
+            .Where(x => !string.IsNullOrWhiteSpace(x.Name))
+            .Select((x, idx) => new { x.Name, Index = idx })
+            .ToDictionary(x => x.Name!, x => x.Index, StringComparer.OrdinalIgnoreCase);
+
+        var grouped = windows
+            .GroupBy(w => string.IsNullOrWhiteSpace(w.VirtualDesktopName) ? string.Empty : w.VirtualDesktopName!, StringComparer.OrdinalIgnoreCase)
+            .Select(g => new DesktopRestoreGroup
+            {
+                DesktopName = string.IsNullOrWhiteSpace(g.Key) ? null : g.Key,
+                Windows = g.ToList()
+            })
+            .ToList();
+
+        return grouped
+            .OrderBy(g => g.DesktopName is null ? int.MaxValue : nameById.GetValueOrDefault(g.DesktopName, int.MaxValue - 1))
+            .ThenBy(g => g.DesktopName ?? string.Empty, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    private sealed class DesktopRestoreGroup
+    {
+        public string? DesktopName { get; init; }
+        public required List<ExplorerWindowState> Windows { get; init; }
+    }
+
 }

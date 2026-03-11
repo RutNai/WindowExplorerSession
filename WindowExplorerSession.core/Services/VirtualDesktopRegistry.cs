@@ -5,6 +5,7 @@ namespace WindowExplorerSession.Core;
 
 internal static class VirtualDesktopRegistry
 {
+    private const string VirtualDesktopsContainer = @"Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops";
     private const string VirtualDesktopsRoot = @"Software\Microsoft\Windows\CurrentVersion\Explorer\VirtualDesktops\Desktops";
 
     public static string? TryGetDesktopName(Guid? desktopId)
@@ -53,6 +54,38 @@ internal static class VirtualDesktopRegistry
         }
 
         return null;
+    }
+
+    public static IReadOnlyList<Guid> GetDesktopOrder()
+    {
+        using var root = Registry.CurrentUser.OpenSubKey(VirtualDesktopsContainer);
+        var blob = root?.GetValue("VirtualDesktopIDs") as byte[];
+        if (blob is null || blob.Length < 16)
+        {
+            return Array.Empty<Guid>();
+        }
+
+        var result = new List<Guid>(blob.Length / 16);
+        for (var offset = 0; offset + 16 <= blob.Length; offset += 16)
+        {
+            var guidBytes = new byte[16];
+            Buffer.BlockCopy(blob, offset, guidBytes, 0, 16);
+            result.Add(new Guid(guidBytes));
+        }
+
+        return result;
+    }
+
+    public static Guid? TryGetCurrentDesktopId()
+    {
+        using var root = Registry.CurrentUser.OpenSubKey(VirtualDesktopsContainer);
+        var raw = root?.GetValue("CurrentVirtualDesktop");
+        return raw switch
+        {
+            byte[] bytes when bytes.Length >= 16 => new Guid(bytes.Take(16).ToArray()),
+            string text when Guid.TryParse(text.Trim('{', '}'), out var guid) => guid,
+            _ => null
+        };
     }
 
     private static string? ReadDesktopName(RegistryKey? key)

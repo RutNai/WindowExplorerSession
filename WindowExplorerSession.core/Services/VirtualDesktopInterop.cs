@@ -9,7 +9,12 @@ internal static class VirtualDesktopInterop
         try
         {
             var manager = GetManager();
-            manager.GetWindowDesktopId(hwnd, out var desktopId);
+            var hr = manager.GetWindowDesktopId(hwnd, out var desktopId);
+            if (hr != 0 || desktopId == Guid.Empty)
+            {
+                return null;
+            }
+
             return desktopId;
         }
         catch
@@ -18,21 +23,23 @@ internal static class VirtualDesktopInterop
         }
     }
 
-    public static void TryMoveWindowToDesktop(IntPtr hwnd, Guid? desktopId)
+    public static bool TryMoveWindowToDesktop(IntPtr hwnd, Guid? desktopId)
     {
         if (desktopId is null || desktopId == Guid.Empty)
         {
-            return;
+            return false;
         }
 
         try
         {
             var manager = GetManager();
-            manager.MoveWindowToDesktop(hwnd, desktopId.Value);
+            var hr = manager.MoveWindowToDesktop(hwnd, desktopId.Value);
+            return hr == 0;
         }
         catch
         {
             // Ignore failures, for example when the desktop id no longer exists.
+            return false;
         }
     }
 
