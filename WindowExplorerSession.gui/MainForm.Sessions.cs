@@ -20,7 +20,17 @@ internal sealed partial class MainForm
                 .ToList();
 
             _bindingSource.DataSource = rows;
+            if (rows.Count == 0)
+            {
+                _savedWindowsBindingSource.DataSource = new List<SavedWindowRow>();
+            }
+
             _statusLabel.Text = $"{rows.Count} session(s) in '{_manager.GetDefaultSessionDirectory()}'.";
+
+            if (_savedWindowsExpanded)
+            {
+                LoadSavedWindowsForSelection();
+            }
         }
         catch (Exception ex)
         {
@@ -116,6 +126,158 @@ internal sealed partial class MainForm
         return null;
     }
 
+    private IReadOnlyList<SavedWindowRow> GetSelectedSavedWindows()
+    {
+        return _savedWindowsGrid.SelectedRows
+            .OfType<DataGridViewRow>()
+            .Select(r => r.DataBoundItem)
+            .OfType<SavedWindowRow>()
+            .GroupBy(r => r.Index)
+            .Select(g => g.First())
+            .ToList();
+    }
+
+    private void ToggleSavedWindowsExplorer()
+    {
+        _savedWindowsExpanded = !_savedWindowsExpanded;
+        _exploreSavedButton.Text = _savedWindowsExpanded ? "Hide Saved Windows" : "Explore Saved Windows";
+
+        if (_savedWindowsExpanded)
+        {
+            const int detailMinSize = 180;
+            _sessionsSplit.Panel2Collapsed = false;
+            _sessionsSplit.Panel2MinSize = detailMinSize;
+
+            LoadSavedWindowsForSelection();
+
+            var targetDistance = Math.Max(180, _sessionsSplit.Height / 2);
+            var maxDistance = Math.Max(0, _sessionsSplit.Height - _sessionsSplit.Panel2MinSize - _sessionsSplit.SplitterWidth);
+            _sessionsSplit.SplitterDistance = Math.Min(targetDistance, maxDistance);
+            return;
+        }
+
+        _sessionsSplit.Panel2Collapsed = true;
+        _sessionsSplit.Panel2MinSize = 0;
+    }
+
+    private void LoadSavedWindowsForSelection()
+    {
+        if (!_savedWindowsExpanded)
+        {
+            return;
+        }
+
+        var selected = GetSelectedSession();
+        if (selected is null)
+        {
+            _savedWindowsBindingSource.DataSource = new List<SavedWindowRow>();
+            return;
+        }
+
+        try
+        {
+            var rows = _manager.GetSessionWindows(selected.FilePath)
+                .Select(w => new SavedWindowRow
+                {
+                    Index = w.Index,
+                    IndexDisplay = (w.Index + 1).ToString(),
+                    Address = w.Address,
+                    VirtualDesktopName = string.IsNullOrWhiteSpace(w.VirtualDesktopName) ? "(default)" : w.VirtualDesktopName,
+                    MonitorDeviceName = string.IsNullOrWhiteSpace(w.MonitorDeviceName) ? "(unknown)" : w.MonitorDeviceName,
+                    Bounds = $"{w.X},{w.Y} {w.Width}x{w.Height}"
+                })
+                .ToList();
+
+            _savedWindowsBindingSource.DataSource = rows;
+        }
+        catch (Exception ex)
+        {
+            _savedWindowsBindingSource.DataSource = new List<SavedWindowRow>();
+            ShowError(ex.Message);
+        }
+    }
+
+    private void RestoreSelectedSavedWindow()
+    {
+        var selectedSession = GetSelectedSession();
+        if (selectedSession is null)
+        {
+            ShowInfo("Select a session first.");
+            return;
+        }
+
+        var selectedWindows = GetSelectedSavedWindows();
+        if (selectedWindows.Count == 0)
+        {
+            ShowInfo("Select one or more saved windows to restore.");
+            return;
+        }
+
+        try
+        {
+            var restoredCount = 0;
+            var orderedWindows = selectedWindows.OrderBy(w => w.Index).ToList();
+
+            foreach (var window in orderedWindows)
+            {
+                restoredCount += _manager.RestoreSessionWindow(selectedSession.FilePath, window.Index);
+            }
+
+            _statusLabel.Text =
+                $"Restored {restoredCount} of {orderedWindows.Count} selected saved window(s) from '{selectedSession.FileName}'.";
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex.Message);
+        }
+    }
+
+    private void DeleteSelectedSavedWindow()
+    {
+        var selectedSession = GetSelectedSession();
+        if (selectedSession is null)
+        {
+            ShowInfo("Select a session first.");
+            return;
+        }
+
+        var selectedWindows = GetSelectedSavedWindows();
+        if (selectedWindows.Count == 0)
+        {
+            ShowInfo("Select one or more saved windows to delete.");
+            return;
+        }
+
+        var result = MessageBox.Show(
+            $"Delete {selectedWindows.Count} saved window(s) from '{selectedSession.FileName}'?",
+            "Confirm Delete Window",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning);
+
+        if (result != DialogResult.Yes)
+        {
+            return;
+        }
+
+        try
+        {
+            var removedCount = 0;
+            foreach (var window in selectedWindows.OrderByDescending(w => w.Index))
+            {
+                _ = _manager.DeleteSessionWindow(selectedSession.FilePath, window.Index);
+                removedCount++;
+            }
+
+            RefreshSessions();
+            _statusLabel.Text =
+                $"Deleted {removedCount} saved window(s) from '{selectedSession.FileName}'.";
+        }
+        catch (Exception ex)
+        {
+            ShowError(ex.Message);
+        }
+    }
+
     private void ShowError(string message)
     {
         _statusLabel.Text = message;
@@ -135,5 +297,15 @@ internal sealed partial class MainForm
         public required string LastWriteLocal { get; init; }
         public required string CapturedAtLocal { get; init; }
         public int WindowCount { get; init; }
+    }
+
+    private sealed class SavedWindowRow
+    {
+        public int Index { get; init; }
+        public required string IndexDisplay { get; init; }
+        public required string Address { get; init; }
+        public required string VirtualDesktopName { get; init; }
+        public required string MonitorDeviceName { get; init; }
+        public required string Bounds { get; init; }
     }
 }
