@@ -39,7 +39,7 @@ internal static class WindowRestorer
             var moved = VirtualDesktopInterop.TryMoveWindowToDesktop(hwnd, targetDesktopId);
             if (!moved)
             {
-                Thread.Sleep(90);
+                Thread.Sleep(30);
                 continue;
             }
 
@@ -49,7 +49,7 @@ internal static class WindowRestorer
                 return;
             }
 
-            Thread.Sleep(90);
+            Thread.Sleep(30);
         }
     }
 
