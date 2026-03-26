@@ -64,10 +64,12 @@ public sealed class SessionManager
 
             var existingWindows = ExplorerWindowEnumerator.GetWindows().ToList();
             var existingHandles = existingWindows.Select(w => w.Hwnd).ToHashSet();
+            var alreadyOpenHandleQueues = OpenWindowTracker.BuildHandleQueues(existingWindows);
 
             var restored = RestoreSessionDesktopBlocking(
                 OrderByDesktop(session.Windows),
                 existingHandles,
+                alreadyOpenHandleQueues,
                 restoredHandles);
 
             return restored;
@@ -310,6 +312,7 @@ public sealed class SessionManager
     private static int RestoreSessionDesktopBlocking(
         IReadOnlyList<DesktopRestoreGroup> desktopGroups,
         HashSet<IntPtr> existingHandles,
+        Dictionary<string, Queue<IntPtr>> alreadyOpenHandleQueues,
         ISet<IntPtr> restoredHandles)
     {
         var restored = 0;
@@ -328,6 +331,17 @@ public sealed class SessionManager
                 }
 
                 EnsureDesktopReady(group.DesktopName);
+
+                if (OpenWindowTracker.TryTakeAlreadyOpenWindowHandle(alreadyOpenHandleQueues, state.Address, out var openHwnd))
+                {
+                    WindowRestorer.Restore(openHwnd, state);
+                    WindowRestorer.StopTaskbarBlink(openHwnd);
+                    _ = restoredHandles.Add(openHwnd);
+                    restoredInGroup.Add((openHwnd, state));
+                    restored++;
+                    continue;
+                }
+
                 ExplorerLauncher.OpenAddress(state.Address, separateProcess: false);
                 var matchedHwnd = ExplorerWindowWaiter.WaitForNewWindow(existingHandles, state.Address, TimeSpan.FromSeconds(12));
                 if (matchedHwnd != IntPtr.Zero)
